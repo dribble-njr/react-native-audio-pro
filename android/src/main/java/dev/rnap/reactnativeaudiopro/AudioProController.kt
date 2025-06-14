@@ -49,7 +49,7 @@ object AudioProController {
 	var headersAudio: Map<String, String>? = null
 	var headersArtwork: Map<String, String>? = null
 
-	private fun log(vararg args: Any?) {
+	fun log(vararg args: Any?) {
 		if (settingDebug) {
 			if (!settingDebugIncludesProgress && args.isNotEmpty() && args[0] == AudioProModule.EVENT_TYPE_PROGRESS) {
 				return
@@ -58,7 +58,7 @@ object AudioProController {
 		}
 	}
 
-	fun setReactContext(context: ReactApplicationContext) {
+	fun setReactContext(context: ReactApplicationContext?) {
 		reactContext = context
 	}
 
@@ -81,6 +81,65 @@ object AudioProController {
 		enginerBrowser = engineBrowserFuture.await()
 		attachPlayerListener()
 		log("MediaBrowser is ready")
+	}
+
+	// Data class to hold parsed play options
+	private data class PlaybackOptions(
+		val contentType: String,
+		val enableDebug: Boolean,
+		val includeProgressInDebug: Boolean,
+		val speed: Float,
+		val volume: Float,
+		val autoPlay: Boolean,
+		val startTimeMs: Long?,
+		val progressIntervalMs: Long,
+		val showNextPrevControls: Boolean
+	)
+
+	// Extracts and applies play options from JS before playback
+	private fun extractPlaybackOptions(options: ReadableMap): PlaybackOptions {
+		val contentType = if (options.hasKey("contentType")) {
+			options.getString("contentType") ?: "MUSIC"
+		} else "MUSIC"
+		val enableDebug = options.hasKey("debug") && options.getBoolean("debug")
+		val includeProgressInDebug =
+			options.hasKey("debugIncludesProgress") && options.getBoolean("debugIncludesProgress")
+		val speed = if (options.hasKey("playbackSpeed")) options.getDouble("playbackSpeed")
+			.toFloat() else 1.0f
+		val volume = if (options.hasKey("volume")) options.getDouble("volume").toFloat() else 1.0f
+		val autoPlay = if (options.hasKey("autoPlay")) options.getBoolean("autoPlay") else true
+		val startTimeMs =
+			if (options.hasKey("startTimeMs")) options.getDouble("startTimeMs").toLong() else null
+		val progressInterval =
+			if (options.hasKey("progressIntervalMs")) options.getDouble("progressIntervalMs")
+				.toLong() else 1000L
+		val showControls =
+			if (options.hasKey("showNextPrevControls")) options.getBoolean("showNextPrevControls") else true
+
+		// Warn if showNextPrevControls is changed after session initialization
+		if (::engineBrowserFuture.isInitialized && enginerBrowser != null && showControls != settingShowNextPrevControls) {
+			Log.w(
+				"[react-native-audio-pro]",
+				"showNextPrevControls changed mid-session; call clear() before changing."
+			)
+		}
+
+		// Apply to controller state
+		settingDebug = enableDebug
+		settingDebugIncludesProgress = includeProgressInDebug
+		settingAudioContentType = when (contentType) {
+			"SPEECH" -> C.AUDIO_CONTENT_TYPE_SPEECH
+			else -> C.AUDIO_CONTENT_TYPE_MUSIC
+		}
+		activePlaybackSpeed = speed
+		activeVolume = volume
+		settingProgressIntervalMs = progressInterval
+		settingShowNextPrevControls = showControls
+
+		return PlaybackOptions(
+			contentType, enableDebug, includeProgressInDebug,
+			speed, volume, autoPlay, startTimeMs, progressInterval, showControls
+		)
 	}
 
 	/**
@@ -106,54 +165,17 @@ object AudioProController {
 	}
 
 	suspend fun play(track: ReadableMap, options: ReadableMap) {
+		val opts = extractPlaybackOptions(options)
+
 		ensurePreparedForNewPlayback()
 		activeTrack = track
 
-		val contentType = if (options.hasKey("contentType")) {
-			options.getString("contentType") ?: "MUSIC"
-		} else "MUSIC"
-		val enableDebug = options.hasKey("debug") && options.getBoolean("debug")
-		val includeProgressInDebug =
-			options.hasKey("debugIncludesProgress") && options.getBoolean("debugIncludesProgress")
-		val speed = if (options.hasKey("playbackSpeed")) {
-			options.getDouble("playbackSpeed").toFloat()
-		} else 1.0f
-		val volume = if (options.hasKey("volume")) {
-			options.getDouble("volume").toFloat()
-		} else 1.0f
-		val autoPlay = if (options.hasKey("autoPlay")) {
-			options.getBoolean("autoPlay")
-		} else true
-		val startTimeMs = if (options.hasKey("startTimeMs")) {
-			options.getDouble("startTimeMs").toLong()
-		} else null
-		val progressInterval = if (options.hasKey("progressIntervalMs")) {
-			options.getDouble("progressIntervalMs").toLong()
-		} else 1000L
-
-		// Configure the player
-		enginerBrowser?.setPlaybackSpeed(speed)
-		enginerBrowser?.setVolume(volume)
-		enginerBrowser?.playWhenReady = autoPlay
-
 		// If startTimeMs is provided and autoPlay is true, set pendingSeekPosition
-		if (startTimeMs != null && autoPlay) {
-			flowPendingSeekPosition = startTimeMs
+		if (opts.startTimeMs != null && opts.autoPlay) {
+			flowPendingSeekPosition = opts.startTimeMs
 		}
 
-		settingDebug = enableDebug
-		settingDebugIncludesProgress = includeProgressInDebug
-		settingAudioContentType = when (contentType) {
-			"SPEECH" -> C.AUDIO_CONTENT_TYPE_SPEECH
-			else -> C.AUDIO_CONTENT_TYPE_MUSIC
-		}
-		activePlaybackSpeed = speed
-		activeVolume = volume
-		settingProgressIntervalMs = progressInterval
-		settingShowNextPrevControls =
-			if (options.hasKey("showNextPrevControls")) options.getBoolean("showNextPrevControls") else true
-
-		log("Configured with contentType=$contentType debug=$settingDebug speed=$speed volume=$volume autoPlay=$autoPlay")
+		log("Configured with contentType=${opts.contentType} debug=${opts.enableDebug} speed=${opts.speed} volume=${opts.volume} autoPlay=${opts.autoPlay}")
 
 		val url = track.getString("url") ?: run {
 			log("Missing track URL")
@@ -206,11 +228,11 @@ object AudioProController {
 				it.prepare()
 
 				// Set playback speed regardless of autoPlay
-				it.setPlaybackSpeed(activePlaybackSpeed)
+				it.setPlaybackSpeed(opts.speed)
 				// Set volume regardless of autoPlay
-				it.setVolume(activeVolume)
+				it.setVolume(opts.volume)
 
-				if (autoPlay) {
+				if (opts.autoPlay) {
 					it.play()
 				} else {
 					emitState(AudioProModule.STATE_PAUSED, 0L, 0L)
@@ -311,10 +333,19 @@ object AudioProController {
 		// Clear pending seek state
 		flowPendingSeekPosition = null
 
-		// Stop playback
+		// Stop playback and ensure player is fully released before destroying service
 		runOnUiThread {
-			detachPlayerListener()
-			enginerBrowser?.stop()
+			try {
+				// First stop playback
+				enginerBrowser?.stop()
+				// Then detach listener to prevent callbacks during teardown
+				detachPlayerListener()
+				// Ensure player is released
+				enginerBrowser?.release()
+				log("Player successfully stopped and released")
+			} catch (e: Exception) {
+				Log.e("[react-native-audio-pro]", "Error stopping player", e)
+			}
 		}
 
 		// Clear track and stop timers
@@ -328,8 +359,11 @@ object AudioProController {
 		// Release resources
 		release()
 
-		// Destroy the playback service to remove notification and tear down the media session
-		destroyPlaybackService()
+		// Add a small delay before destroying service to ensure player is fully released
+		Handler(Looper.getMainLooper()).postDelayed({
+			// Destroy the playback service to remove notification and tear down the media session
+			destroyPlaybackService()
+		}, 50)
 
 		// Emit final state
 		emitState(finalState, 0L, 0L)
@@ -431,7 +465,12 @@ object AudioProController {
 
 			override fun onIsPlayingChanged(isPlaying: Boolean) {
 				log("onIsPlayingChanged", "isPlaying=", isPlaying)
-				log("onIsPlayingChanged -> currentPosition=", enginerBrowser?.currentPosition, "duration=", enginerBrowser?.duration)
+				log(
+					"onIsPlayingChanged -> currentPosition=",
+					enginerBrowser?.currentPosition,
+					"duration=",
+					enginerBrowser?.duration
+				)
 				val pos = enginerBrowser?.currentPosition ?: 0L
 				val dur = enginerBrowser?.duration ?: 0L
 
@@ -445,7 +484,15 @@ object AudioProController {
 			}
 
 			override fun onPlaybackStateChanged(state: Int) {
-				log("onPlaybackStateChanged", "state=", state, "playWhenReady=", enginerBrowser?.playWhenReady, "isPlaying=", enginerBrowser?.isPlaying)
+				log(
+					"onPlaybackStateChanged",
+					"state=",
+					state,
+					"playWhenReady=",
+					enginerBrowser?.playWhenReady,
+					"isPlaying=",
+					enginerBrowser?.isPlaying
+				)
 				val pos = enginerBrowser?.currentPosition ?: 0L
 				val dur = enginerBrowser?.duration ?: 0L
 				val isPlayIntended = enginerBrowser?.playWhenReady == true
@@ -627,7 +674,10 @@ object AudioProController {
 				.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
 				.emit(AudioProModule.EVENT_NAME, body)
 		} else {
-			Log.w("[react-native-audio-pro]", "Context is not an instance of ReactApplicationContext")
+			Log.w(
+				"[react-native-audio-pro]",
+				"Context is not an instance of ReactApplicationContext"
+			)
 		}
 	}
 
