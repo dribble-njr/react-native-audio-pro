@@ -21,11 +21,15 @@ import {
 } from './player-service';
 import { playlist } from './playlist';
 import { styles } from './styles';
+import { useNotificationPermission } from './useNotificationPermission';
 import { formatTime, getStateColor } from './utils';
 import { AudioPro } from '../../src/audioPro';
 import { AudioProState } from '../../src/values';
 
 export default function App() {
+	// For notification
+	useNotificationPermission();
+
 	const [currentIndex, setLocalIndex] = useState(getCurrentTrackIndex());
 	const [progressInterval, setLocalProgressInterval] = useState(getProgressInterval());
 	const currentTrack = playlist[currentIndex];
